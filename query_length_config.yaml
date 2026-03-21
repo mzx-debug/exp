@@ -1,0 +1,97 @@
+dataset:
+  name: "natural_questions"
+  source: "huggingface"
+  split: "validation"
+  sample_queries: null
+  random_seed: 2026
+
+models:
+  retrieval:
+    name: "e5"
+    model_path: "intfloat/e5-large-v2"
+    max_length: 512
+    batch_size: 512
+    use_fp16: true
+    pooling_method: "mean"
+    device: "cuda"
+
+  generators:
+    - name: "llama3-8B"
+      model_path: "/data/home/mazhenxiang/.cache/modelscope/hub/Meta-Llama-3.1-8B-Instruct"
+      max_input_len: 4096
+      max_output_len: 128
+
+    - name: "llama2-13B"
+      model_path: "meta-llama/Llama-2-13b-hf"
+      max_input_len: 4096
+      max_output_len: 128
+
+    - name: "opt-30B"
+      model_path: "facebook/opt-30b"
+      max_input_len: 2048
+      max_output_len: 128
+
+retrieval:
+  index_path: "/data/home/mazhenxiang/Hedra-RAG-EXP/HedraRAG/data/index_0319/msacro/IVF4096/ivf.index"
+  corpus_path: "Tevatron/msmarco-passage-corpus"
+  index_type: "IVF4096"
+  metric: "inner_product"
+  nprobe_values: [128, 256, 512]
+  topk: 1
+  faiss_gpu: false
+
+query_length_analysis:
+  batch_size: 128
+  sample_size: 200
+  categories:
+    short:
+      max_tokens: 10
+    medium:
+      min_tokens: 11
+      max_tokens: 20
+    long:
+      min_tokens: 21
+  print_distribution: true
+
+rag:
+  workflow_type: "one_shot"
+  query_prompt: "Answer the question: {query}"
+  prompt_template: "Question: {query}\nContext: {context}\nAnswer:"
+  generation:
+    temperature: 0.0
+    top_p: 1.0
+    top_k: null
+
+timing:
+  skip_first_batch: true
+  warmup_query_count: 32
+  use_perf_counter: true
+  detailed_query_timing: false
+
+output:
+  output_dir: "../output/query_length_experiment"
+  csv_filename: "results_qlength_{nprobe}_{llm_model}.csv"
+  json_filename: "detailed_log_qlength_{nprobe}_{llm_model}.json"
+  generate_plots: true
+  plot_format: "svg"
+  plot_dpi: 300
+
+optimization:
+  vllm_gpu_memory_utilization: 0.62
+  vllm_enforce_eager: false
+  retrieval_parallel_queries: false
+  prefetch_corpus: false
+
+debug:
+  verbose: true
+  print_interval: 10
+  save_intermediate: false
+  test_mode: false
+  test_sample_size: 100
+  test_batch_sizes: [1, 2, 4, 8, 16]
+
+system:
+  gpu_id: "0,4"
+  num_workers: 16
+  mixed_precision: "fp16"
+  torch_compile: false

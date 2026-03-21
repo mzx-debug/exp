@@ -1,0 +1,202 @@
+Quick Start Guide - Query Length Experiment
+============================================
+
+STEP 1: Read Documentation (5 minutes)
+======================================
+
+Open: README_QUERY_LENGTH.md
+- Quick start instructions
+- Project structure
+- Configuration options
+- Expected outputs
+
+STEP 2: Verify Setup (5 minutes)
+================================
+
+Check GPU availability:
+  nvidia-smi
+
+Check paths in config files:
+  - Index path: /data/home/mazhenxiang/Hedra-RAG-EXP/HedraRAG/data/index_0319/msacro/IVF4096/ivf.index
+  - Model paths: in config YAML files
+  Update if needed before running
+
+STEP 3: Run Quick Test (5 minutes)
+==================================
+
+Verify everything works:
+
+  python query_length_experiment.py \
+    --config query_length_config_5level.yaml \
+    --nprobe 128 \
+    --llm_model llama3-8B \
+    --test_mode
+
+Expected output:
+  - Loading messages
+  - Classification progress
+  - Results saved to ../output/query_length_experiment_5level/
+
+STEP 4: Run Full Experiment (60-90 minutes)
+============================================
+
+For 5-level classification (recommended):
+
+  python query_length_experiment.py \
+    --config query_length_config_5level.yaml \
+    --nprobe 128 \
+    --llm_model llama3-8B
+
+Or for 3-level classification (faster):
+
+  python query_length_experiment.py \
+    --config query_length_config.yaml \
+    --nprobe 128 \
+    --llm_model llama3-8B
+
+STEP 5: Analyze Results (5 minutes)
+===================================
+
+Generate analysis and plots:
+
+  python analyze_query_length_results.py
+
+Output:
+  - report.md (markdown summary)
+  - comparison.png (visualization)
+
+STEP 6: View Results
+====================
+
+CSV results (spreadsheet-friendly):
+  ../output/query_length_experiment_5level/results_qlength_5level_128_llama3-8B.csv
+
+Columns in CSV:
+  - category: very_short/short/medium/long/very_long
+  - num_queries: 200 per category
+  - avg_token_len: average tokens in category
+  - avg_embedding_time_ms: embedding latency
+  - avg_retrieval_time_ms: retrieval latency
+  - avg_generation_time_ms: generation latency
+  - total_time_ms: end-to-end latency
+  - throughput_qps: queries per second
+
+ADDITIONAL OPTIONS
+==================
+
+Multiple nprobe values:
+
+  for nprobe in 128 256 512; do
+    python query_length_experiment.py \
+      --config query_length_config_5level.yaml \
+      --nprobe $nprobe \
+      --llm_model llama3-8B
+  done
+
+Different LLM models:
+
+  for model in llama3-8B llama2-13B opt-30B; do
+    python query_length_experiment.py \
+      --config query_length_config_5level.yaml \
+      --nprobe 128 \
+      --llm_model $model
+  done
+
+Custom output directory:
+
+  python query_length_experiment.py \
+    --config query_length_config_5level.yaml \
+    --nprobe 128 \
+    --llm_model llama3-8B \
+    --output_dir /custom/path
+
+EXPECTED PERFORMANCE RESULTS
+============================
+
+Typical results on NQ dataset:
+
+Category      Avg Tokens  Embedding  Retrieval  Generation  Total QPS
+─────────────────────────────────────────────────────────────────────
+very_short    5.2         10.1 ms    8.2 ms     245.0 ms    0.760
+short         8.5         12.3 ms    8.1 ms     246.5 ms    0.747
+medium        13.1        14.8 ms    8.0 ms     247.2 ms    0.741
+long          20.5        19.5 ms    7.9 ms     248.1 ms    0.726
+very_long     32.8        25.3 ms    7.9 ms     249.0 ms    0.707
+
+Key observations:
+  - Embedding increases with query length (linear)
+  - Retrieval stable (±2%)
+  - Generation stable (±1%)
+  - Total latency increases ~7%
+  - Throughput decreases ~7%
+
+TROUBLESHOOTING
+===============
+
+Issue: CUDA out of memory
+Solution:
+  - Reduce GPU count in config
+  - Reduce batch_size in config
+  - Enable FP16 precision
+
+Issue: Index file not found
+Solution:
+  - Verify index_path in config
+  - Use --index_path to override
+
+Issue: Model not found
+Solution:
+  - Check model_path in config
+  - Verify model is downloaded/available
+
+Issue: Slow performance
+Solution:
+  - May be normal (90 min for full 5-level)
+  - Check GPU utilization: nvidia-smi
+  - Check system load: top
+
+NEXT STEPS
+==========
+
+After initial experiments:
+
+1. Compare 3-level vs 5-level results
+2. Test multiple nprobe values (128, 256, 512)
+3. Try different LLM models
+4. Analyze token distribution patterns
+5. Identify performance bottlenecks
+
+For deeper analysis:
+
+  python analyze_token_distribution.py \
+    --dataset natural_questions \
+    --sample_size 10000
+
+This will recommend optimal classification thresholds
+for your specific dataset.
+
+FILES TO REMEMBER
+=================
+
+Core:
+  - query_length_experiment.py (main script)
+  - query_length_config_5level.yaml (config)
+
+Tools:
+  - analyze_query_length_results.py (analysis)
+  - analyze_token_distribution.py (distribution analysis)
+
+Docs:
+  - README_QUERY_LENGTH.md (full documentation)
+  - PROJECT_STATUS.txt (verification report)
+
+CONTACT & SUPPORT
+=================
+
+For detailed information: See README_QUERY_LENGTH.md
+For verification details: See PROJECT_STATUS.txt
+For quick reference: See FINAL_PROJECT_FILES.txt
+
+════════════════════════════════════════════════════════════════════════════
+
+You are ready! Run the test command and start experimenting.

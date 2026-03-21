@@ -1,2 +1,4 @@
 data/msmarco_2k.jsonl
 data/msmarco_2k.jsonl
+__pycache__/
+.claude/
