@@ -6,6 +6,7 @@ Query Token Length Distribution Analysis
 """
 
 import sys
+import re
 from pathlib import Path
 from typing import List, Dict, Tuple
 import numpy as np
@@ -303,7 +304,7 @@ def analyze_dataset(
     lengths = compute_token_lengths(queries, tokenizer)
 
     # 5. 打印统计信息
-    print_statistics(lengths, dataset_name)
+    print_statistics(lengths, f"{dataset_name}:{split}")
 
     # 6. 建议分类阈值
     thresholds_percentile = suggest_5_level_thresholds(lengths)
@@ -324,8 +325,10 @@ def analyze_dataset(
 
     # 8. 生成可视化
     print("\nGenerating visualization...")
-    generate_distribution_plot(lengths, thresholds_balanced,
-                             output_file=f"token_distribution_{dataset_name}.png")
+    safe_dataset = re.sub(r"[^a-zA-Z0-9._-]+", "_", dataset_name).strip("_")
+    safe_split = re.sub(r"[^a-zA-Z0-9._-]+", "_", split).strip("_")
+    output_file = f"token_distribution_{safe_dataset}_{safe_split}.png"
+    generate_distribution_plot(lengths, thresholds_balanced, output_file=output_file)
 
     # 9. 导出配置建议
     print(f"\n{'='*70}")
@@ -356,8 +359,8 @@ def main():
     parser = argparse.ArgumentParser(description="Analyze token length distribution in a dataset")
     parser.add_argument("--dataset", type=str, default="natural_questions",
                        help="Dataset name (default: natural_questions)")
-    parser.add_argument("--split", type=str, default="validation",
-                       help="Dataset split (default: validation)")
+    parser.add_argument("--split", type=str, default="train",
+                       help="Dataset split (default: train)")
     parser.add_argument("--sample_size", type=int, default=None,
                        help="Sample size (default: use all queries)")
     parser.add_argument("--seed", type=int, default=2026,
