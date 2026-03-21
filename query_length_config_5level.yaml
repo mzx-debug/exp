@@ -85,6 +85,7 @@ output:
 optimization:
   vllm_gpu_memory_utilization: 0.62
   vllm_enforce_eager: false
+  vllm_tensor_parallel_size: 2
   retrieval_parallel_queries: false
   prefetch_corpus: false
 

@@ -306,7 +306,7 @@ class GenerationStage:
         self.SamplingParams = SamplingParams
         self.llm = LLM(
             model=llm_config["model_path"],
-            tensor_parallel_size=2,
+            tensor_parallel_size=config["optimization"].get("vllm_tensor_parallel_size", 1),
             gpu_memory_utilization=config["optimization"]["vllm_gpu_memory_utilization"],
             enforce_eager=config["optimization"]["vllm_enforce_eager"],
         )
