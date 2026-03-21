@@ -142,7 +142,7 @@ def bin_queries_by_length(
     categories_config = config["query_length_analysis"]["categories"]
 
     result = {}
-    for category in ["short", "medium", "long"]:
+    for category in categories_config.keys():
         cat_config = categories_config[category]
         min_tokens = cat_config.get("min_tokens", 0)
         max_tokens = cat_config.get("max_tokens", float("inf"))
@@ -331,7 +331,7 @@ class QueryLengthExperiment:
         random_seed = self.config["dataset"]["random_seed"]
 
         sampled = {}
-        for category in ["short", "medium", "long"]:
+        for category in self.config["query_length_analysis"]["categories"].keys():
             cat_queries, cat_lengths = binned[category]
             sampled_queries, sampled_lengths = sample_category(
                 cat_queries,
@@ -423,8 +423,8 @@ class QueryLengthExperiment:
 
     def run(self) -> None:
         """对所有 query 长度类别执行实验"""
-        # 自动获取所有类别（支持 3 级、5 级或更多）
-        categories = sorted(self.length_categories.keys())
+        # 按 YAML 中定义的顺序遍历（Python 3.7+ dict 保持插入顺序）
+        categories = list(self.config["query_length_analysis"]["categories"].keys())
 
         for category in categories:
             queries, lengths = self.length_categories[category]
@@ -516,7 +516,9 @@ class QueryLengthExperiment:
         throughputs = [result.throughput_qps for result in self.results]
 
         plt.figure(figsize=(10, 6))
-        plt.bar(categories, throughputs, color=["green", "orange", "red"])
+        palette = ["steelblue", "green", "orange", "tomato", "red"]
+        colors = palette[:len(categories)]
+        plt.bar(categories, throughputs, color=colors)
         plt.xlabel("Query Length Category")
         plt.ylabel("Throughput (queries/sec)")
         plt.title(f"Throughput by Query Length | nprobe={self.nprobe} | llm={self.llm_model}")

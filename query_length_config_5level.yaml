@@ -41,22 +41,22 @@ retrieval:
   faiss_gpu: false
 
 query_length_analysis:
-  batch_size: 128
-  sample_size: 200
+  batch_size: 1
+  sample_size: 100
   categories:
     very_short:
-      max_tokens: 6
+      max_tokens: 10      # 28.8%，约2258条
     short:
-      min_tokens: 7
-      max_tokens: 10
-    medium:
       min_tokens: 11
-      max_tokens: 15
+      max_tokens: 13      # 52.2%，约4090条
+    medium:
+      min_tokens: 14
+      max_tokens: 16      # 13.2%，约1032条
     long:
-      min_tokens: 16
-      max_tokens: 25
+      min_tokens: 17
+      max_tokens: 20      #  4.0%，约313条
     very_long:
-      min_tokens: 26
+      min_tokens: 21      #  1.8%，约137条
   print_distribution: true
 
 rag:
