@@ -383,12 +383,31 @@ class GenerationStage:
         from vllm import LLM, SamplingParams
 
         self.SamplingParams = SamplingParams
-        self.llm = LLM(
-            model=llm_config["model_path"],
-            tensor_parallel_size=config["optimization"].get("vllm_tensor_parallel_size", 1),
-            gpu_memory_utilization=config["optimization"]["vllm_gpu_memory_utilization"],
-            enforce_eager=config["optimization"]["vllm_enforce_eager"],
-        )
+        llm_kwargs = {
+            "model": llm_config["model_path"],
+            "tensor_parallel_size": config["optimization"].get("vllm_tensor_parallel_size", 1),
+            "gpu_memory_utilization": config["optimization"]["vllm_gpu_memory_utilization"],
+            "enforce_eager": config["optimization"]["vllm_enforce_eager"],
+        }
+        configured_tokenizer_mode = config["optimization"].get("vllm_tokenizer_mode")
+        if configured_tokenizer_mode is not None:
+            llm_kwargs["tokenizer_mode"] = configured_tokenizer_mode
+
+        try:
+            self.llm = LLM(**llm_kwargs)
+        except AttributeError as exc:
+            # Some environments return a tokenizer backend object that misses
+            # vLLM-required attrs; retry with the slow tokenizer backend.
+            if "all_special_tokens_extended" not in str(exc):
+                raise
+            if llm_kwargs.get("tokenizer_mode") == "slow":
+                raise
+            self.logger.warning(
+                "vLLM tokenizer init failed (%s). Retrying with tokenizer_mode='slow'.",
+                exc,
+            )
+            llm_kwargs["tokenizer_mode"] = "slow"
+            self.llm = LLM(**llm_kwargs)
         self._fallback_tokenizer = self.llm.get_tokenizer()
 
     def set_max_tokens(self, max_tokens: int) -> None:
