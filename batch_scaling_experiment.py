@@ -379,6 +379,8 @@ class GenerationStage:
         self.llm_config = llm_config
         self.default_max_tokens = int(llm_config["max_output_len"])
         self.active_max_tokens = self.default_max_tokens
+        self.max_model_len: Optional[int] = None
+        self._logged_prompt_truncation_notice = False
         self.logger.info("Loading generation model via vLLM: %s", llm_config["model_path"])
 
         from vllm import LLM, SamplingParams
@@ -395,6 +397,7 @@ class GenerationStage:
             configured_max_model_len = llm_config.get("max_input_len")
         if configured_max_model_len is not None:
             llm_kwargs["max_model_len"] = int(configured_max_model_len)
+            self.max_model_len = int(configured_max_model_len)
         configured_tokenizer_mode = config["optimization"].get("vllm_tokenizer_mode")
         if configured_tokenizer_mode is not None:
             llm_kwargs["tokenizer_mode"] = configured_tokenizer_mode
@@ -424,6 +427,12 @@ class GenerationStage:
             llm_kwargs["tokenizer_mode"] = "slow"
             self.llm = LLM(**llm_kwargs)
         self._fallback_tokenizer = self.llm.get_tokenizer()
+        if self.max_model_len is None:
+            resolved_max_model_len = getattr(getattr(self.llm, "llm_engine", None), "model_config", None)
+            if resolved_max_model_len is not None:
+                resolved_value = getattr(resolved_max_model_len, "max_model_len", None)
+                if resolved_value is not None:
+                    self.max_model_len = int(resolved_value)
 
     def set_max_tokens(self, max_tokens: int) -> None:
         if max_tokens <= 0:
@@ -444,6 +453,7 @@ class GenerationStage:
             build_prompt(query=query, context="\n".join(docs), config=self.config)
             for query, docs in zip(queries, retrieved_docs)
         ]
+        prompts = self._truncate_prompts_if_needed(prompts)
 
         generation_config = self.config["rag"]["generation"]
         sampling_kwargs = {
@@ -477,6 +487,56 @@ class GenerationStage:
         synchronize_cuda_if_needed()
         elapsed = time.perf_counter() - start
         return answers, elapsed, generated_tokens
+
+    def _tokenize_prompt(self, prompt: str) -> List[int]:
+        encoded = self._fallback_tokenizer(prompt, add_special_tokens=False)
+        if isinstance(encoded, dict):
+            input_ids = encoded.get("input_ids")
+            if input_ids is None:
+                return []
+            if input_ids and isinstance(input_ids[0], list):
+                return list(input_ids[0])
+            return list(input_ids)
+        if isinstance(encoded, list):
+            if encoded and isinstance(encoded[0], list):
+                return list(encoded[0])
+            return list(encoded)
+        return list(getattr(encoded, "input_ids", []))
+
+    def _truncate_prompts_if_needed(self, prompts: List[str]) -> List[str]:
+        if self.max_model_len is None:
+            return prompts
+        prompt_token_budget = self.max_model_len - self.active_max_tokens
+        if prompt_token_budget <= 0:
+            raise ValueError(
+                f"Invalid token budget: max_model_len={self.max_model_len} active_max_tokens={self.active_max_tokens}."
+            )
+
+        truncated_count = 0
+        processed_prompts: List[str] = []
+        for prompt in prompts:
+            token_ids = self._tokenize_prompt(prompt)
+            if len(token_ids) > prompt_token_budget:
+                token_ids = token_ids[:prompt_token_budget]
+                prompt = self._fallback_tokenizer.decode(
+                    token_ids,
+                    skip_special_tokens=True,
+                    clean_up_tokenization_spaces=False,
+                )
+                truncated_count += 1
+            processed_prompts.append(prompt)
+
+        if truncated_count > 0 and not self._logged_prompt_truncation_notice:
+            self.logger.warning(
+                "Truncated %s overlong prompts to fit token budget=%s (max_model_len=%s, max_tokens=%s).",
+                truncated_count,
+                prompt_token_budget,
+                self.max_model_len,
+                self.active_max_tokens,
+            )
+            self._logged_prompt_truncation_notice = True
+
+        return processed_prompts
 
 
 class BatchScalingExperiment:
