@@ -389,9 +389,23 @@ class GenerationStage:
             "gpu_memory_utilization": config["optimization"]["vllm_gpu_memory_utilization"],
             "enforce_eager": config["optimization"]["vllm_enforce_eager"],
         }
+        configured_max_model_len = config["optimization"].get("vllm_max_model_len")
+        if configured_max_model_len is None:
+            configured_max_model_len = llm_config.get("max_input_len")
+        if configured_max_model_len is not None:
+            llm_kwargs["max_model_len"] = int(configured_max_model_len)
         configured_tokenizer_mode = config["optimization"].get("vllm_tokenizer_mode")
         if configured_tokenizer_mode is not None:
             llm_kwargs["tokenizer_mode"] = configured_tokenizer_mode
+
+        self.logger.info(
+            "vLLM init params: tensor_parallel_size=%s gpu_memory_utilization=%s enforce_eager=%s max_model_len=%s tokenizer_mode=%s",
+            llm_kwargs.get("tensor_parallel_size"),
+            llm_kwargs.get("gpu_memory_utilization"),
+            llm_kwargs.get("enforce_eager"),
+            llm_kwargs.get("max_model_len", "default"),
+            llm_kwargs.get("tokenizer_mode", "auto"),
+        )
 
         try:
             self.llm = LLM(**llm_kwargs)
