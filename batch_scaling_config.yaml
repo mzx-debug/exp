@@ -72,6 +72,16 @@ rag:
     temperature: 0.0                  
     top_p: 1.0
     top_k: null
+    # Optional manual override. When this is set, length_probe should be disabled.
+    # max_tokens_override: 64
+    length_probe:
+      enabled: true
+      sample_size: 128
+      probe_batch_size: 16
+      # Expected fraction of generations that will hit truncation.
+      target_truncation_ratio: 0.7
+      min_max_tokens: 16
+      max_max_tokens: null
 
 
 timing:
@@ -92,9 +102,9 @@ output:
 
   output_dir: "../output/batch_scaling_experiment"
 
-  csv_filename: "results_{nprobe}_{llm_model}.csv"
+  csv_filename: "results_{nprobe}_{llm_model}_{stage_backend}.csv"
 
-  json_filename: "detailed_log_{nprobe}_{llm_model}.json"
+  json_filename: "detailed_log_{nprobe}_{llm_model}_{stage_backend}.json"
 
   generate_plots: true
 
