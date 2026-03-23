@@ -6,6 +6,7 @@ import logging
 import math
 import os
 import random
+import subprocess
 import string
 import sys
 import time
@@ -965,7 +966,36 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    backends = ["cpu", "gpu"] if args.stage_backend == "both" else [args.stage_backend]
+
+    if args.stage_backend == "both":
+        script_path = Path(__file__).resolve()
+        for backend in ("cpu", "gpu"):
+            cmd = [
+                sys.executable,
+                str(script_path),
+                "--config",
+                str(args.config),
+                "--nprobe",
+                str(args.nprobe),
+                "--llm_model",
+                args.llm_model,
+                "--stage_backend",
+                backend,
+            ]
+            if args.index_path is not None:
+                cmd.extend(["--index_path", str(args.index_path)])
+            if args.output_dir is not None:
+                cmd.extend(["--output_dir", str(args.output_dir)])
+            if args.max_batch_size is not None:
+                cmd.extend(["--max_batch_size", str(args.max_batch_size)])
+            if args.test_mode:
+                cmd.append("--test_mode")
+
+            print(f"[both-mode] Launching backend={backend}: {' '.join(cmd)}")
+            subprocess.run(cmd, check=True)
+        return
+
+    backends = [args.stage_backend]
     for backend in backends:
         experiment = BatchScalingExperiment(
             config_path=args.config,
