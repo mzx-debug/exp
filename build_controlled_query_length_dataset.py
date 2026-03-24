@@ -30,9 +30,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from batch_scaling_experiment import extract_question, set_random_seed  # noqa: E402
-from heterag.retriever.utils import pooling  # noqa: E402
-
 
 SYSTEM_PROMPT = (
     "You rewrite user questions while preserving meaning exactly. "
@@ -56,6 +53,39 @@ DEFAULT_PROVIDER_CONFIG: Dict[str, Dict[str, Optional[str]]] = {
         "api_mode": "responses",
     },
 }
+
+
+def set_random_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def extract_question(record: Dict[str, Any]) -> Optional[str]:
+    question = record.get("question")
+    if isinstance(question, str) and question.strip():
+        return question.strip()
+    if isinstance(question, dict):
+        for key in ("text", "question"):
+            value = question.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    for key in ("question_text", "query"):
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def mean_pooling(last_hidden_state: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+    mask = attention_mask.unsqueeze(-1).expand(last_hidden_state.size()).float()
+    masked_embeddings = last_hidden_state * mask
+    sum_embeddings = masked_embeddings.sum(dim=1)
+    sum_mask = mask.sum(dim=1).clamp(min=1e-9)
+    return sum_embeddings / sum_mask
 
 
 @dataclass
@@ -107,12 +137,7 @@ class SemanticChecker:
         )
         inputs = {key: value.to(self.device) for key, value in inputs.items()}
         outputs = self.model(**inputs, return_dict=True)
-        vectors = pooling(
-            getattr(outputs, "pooler_output", None),
-            outputs.last_hidden_state,
-            inputs["attention_mask"],
-            pooling_method="mean",
-        )
+        vectors = mean_pooling(outputs.last_hidden_state, inputs["attention_mask"])
         vectors = torch.nn.functional.normalize(vectors, dim=-1)
         return vectors.detach().cpu().numpy().astype(np.float32, order="C")
 
