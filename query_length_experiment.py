@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
 """
-Query Length Analysis Experiment
+Query length impact analysis for one-shot RAG.
 
-研究不同长度的 query 对 RAG 系统各个阶段（embedding/retrieval/generation）的影响。
-- 固定 batch_size
-- 按 e5 tokenizer token 数分为 short/medium/long 三类
-- 各类采样 200 条 query
-- 对比各阶段平均时间和吞吐量
+Supports two modes:
+1) natural_binning: bin natural-questions queries by token length.
+2) controlled_dataset: read pre-generated buckets (e.g., t8/t16/.../t256).
 """
 
 import argparse
+import inspect
 import json
 import logging
 import math
 import os
+import re
 import sys
-import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import matplotlib
+
 matplotlib.use("Agg")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -31,35 +31,27 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
-import yaml
 from datasets import load_dataset
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoTokenizer
 
-# 复用 batch_scaling_experiment 中的工具和类
 from batch_scaling_experiment import (
+    GenerationStage,
     QueryEmbeddingStage,
     RetrievalStage,
-    GenerationStage,
-    BatchRecord,
-    TimingResult,
     extract_question,
-    build_prompt,
-    synchronize_if_needed,
-    set_random_seed,
     load_yaml_config,
     resolve_path,
-    validate_local_file,
-    filter_batch_sizes,
+    set_random_seed,
     split_queries_for_warmup,
+    validate_local_file,
 )
 
 
 @dataclass
 class CategoryTimingResult:
-    """某个 query 长度类别的统计结果"""
-    category_name: str  # "short", "medium", "long"
+    category_name: str
     num_queries: int
-    avg_token_len: float  # 该类别 query 的平均 token 数
+    avg_token_len: float
     embedding_total_sec: float
     retrieval_total_sec: float
     generation_total_sec: float
@@ -85,40 +77,29 @@ class CategoryTimingResult:
         self.throughput_qps = self.num_queries / self.total_sec if self.total_sec > 0 else math.inf
 
 
-def compute_token_lengths(
-    queries: List[str],
-    tokenizer: AutoTokenizer,
-) -> List[int]:
-    """
-    计算每条 query 的 token 数（使用 e5 tokenizer）
-
-    Args:
-        queries: query 列表
-        tokenizer: e5 tokenizer 对象
-
-    Returns:
-        token 长度列表，对应每条 query
-    """
+def compute_token_lengths(queries: List[str], tokenizer: AutoTokenizer) -> List[int]:
     token_lengths = []
     for query in queries:
-        # 不 padding，直接统计 token 数
         encoded = tokenizer(query, truncation=False, add_special_tokens=True)
         token_lengths.append(len(encoded["input_ids"]))
     return token_lengths
 
 
 def print_length_distribution(queries: List[str], lengths: List[int], logger: logging.Logger) -> None:
-    """打印 token 长度分布统计"""
     logger.info("=== Query Token Length Distribution ===")
-    logger.info(f"Total queries: {len(queries)}")
-    logger.info(f"Min tokens: {min(lengths)}, Max tokens: {max(lengths)}, Mean tokens: {np.mean(lengths):.1f}")
+    logger.info("Total queries: %s", len(queries))
+    logger.info(
+        "Min tokens: %s, Max tokens: %s, Mean tokens: %.1f",
+        min(lengths),
+        max(lengths),
+        np.mean(lengths),
+    )
 
-    # 分段统计
     ranges = [(0, 5), (6, 10), (11, 15), (16, 20), (21, 30), (31, 100), (101, 1000)]
     for start, end in ranges:
-        count = sum(1 for l in lengths if start <= l <= end)
-        pct = 100.0 * count / len(lengths) if len(lengths) > 0 else 0
-        logger.info(f"  [{start:3d}, {end:3d}]: {count:4d} queries ({pct:5.1f}%)")
+        count = sum(1 for value in lengths if start <= value <= end)
+        pct = 100.0 * count / len(lengths) if lengths else 0
+        logger.info("  [%3d, %3d]: %4d queries (%5.1f%%)", start, end, count, pct)
 
 
 def bin_queries_by_length(
@@ -127,39 +108,26 @@ def bin_queries_by_length(
     config: Dict[str, Any],
     logger: logging.Logger,
 ) -> Dict[str, Tuple[List[str], List[int]]]:
-    """
-    按 token 长度分类 query
-
-    Args:
-        queries: query 列表
-        lengths: 对应的 token 长度列表
-        config: 配置 dict，包含 query_length_analysis.categories
-        logger: logger
-
-    Returns:
-        {"short": (queries, lengths), "medium": ..., "long": ...}
-    """
     categories_config = config["query_length_analysis"]["categories"]
+    result: Dict[str, Tuple[List[str], List[int]]] = {}
 
-    result = {}
     for category in categories_config.keys():
         cat_config = categories_config[category]
         min_tokens = cat_config.get("min_tokens", 0)
         max_tokens = cat_config.get("max_tokens", float("inf"))
 
-        # 筛选落在该范围的 query
-        selected_indices = [
-            i for i, l in enumerate(lengths)
-            if min_tokens <= l <= max_tokens
-        ]
-        cat_queries = [queries[i] for i in selected_indices]
-        cat_lengths = [lengths[i] for i in selected_indices]
+        selected_indices = [idx for idx, token_len in enumerate(lengths) if min_tokens <= token_len <= max_tokens]
+        cat_queries = [queries[idx] for idx in selected_indices]
+        cat_lengths = [lengths[idx] for idx in selected_indices]
 
         result[category] = (cat_queries, cat_lengths)
         logger.info(
-            f"Category '{category}': {len(cat_queries)} queries, "
-            f"token range [{min_tokens}, {max_tokens}], "
-            f"mean tokens: {np.mean(cat_lengths) if cat_lengths else 0:.1f}"
+            "Category '%s': %s queries, token range [%s, %s], mean tokens: %.1f",
+            category,
+            len(cat_queries),
+            min_tokens,
+            max_tokens,
+            np.mean(cat_lengths) if cat_lengths else 0.0,
         )
 
     return result
@@ -171,32 +139,38 @@ def sample_category(
     sample_size: int,
     random_seed: int,
 ) -> Tuple[List[str], List[int]]:
-    """
-    从某个类别中随机采样
-
-    Args:
-        queries: 该类别的所有 query
-        lengths: 对应的 token 长度
-        sample_size: 采样数
-        random_seed: 随机种子
-
-    Returns:
-        (采样后的 queries, 对应的 lengths)
-    """
+    if sample_size <= 0:
+        raise ValueError("sample_size must be positive.")
     if len(queries) <= sample_size:
         return queries, lengths
 
     rng = np.random.RandomState(random_seed)
     indices = rng.choice(len(queries), sample_size, replace=False)
-    sampled_queries = [queries[i] for i in sorted(indices.tolist())]
-    sampled_lengths = [lengths[i] for i in sorted(indices.tolist())]
-
+    picked = sorted(indices.tolist())
+    sampled_queries = [queries[idx] for idx in picked]
+    sampled_lengths = [lengths[idx] for idx in picked]
     return sampled_queries, sampled_lengths
 
 
-class QueryLengthExperiment:
-    """Query 长度分析实验"""
+def _supports_backend_arg(stage_cls: Any) -> bool:
+    signature = inspect.signature(stage_cls.__init__)
+    return "backend" in signature.parameters
 
+
+def _extract_generation_elapsed(generation_output: Tuple[Any, ...]) -> float:
+    if len(generation_output) >= 2:
+        return float(generation_output[1])
+    raise ValueError("Unexpected generation stage output format.")
+
+
+def _category_sort_key(category: str) -> Tuple[int, str]:
+    match = re.search(r"(\d+)", category)
+    if match:
+        return int(match.group(1)), category
+    return 10**9, category
+
+
+class QueryLengthExperiment:
     def __init__(
         self,
         config_path: Path,
@@ -207,9 +181,9 @@ class QueryLengthExperiment:
         test_mode: bool,
     ) -> None:
         config_path = config_path.resolve()
+        self.config_path = config_path
         self.config = load_yaml_config(config_path)
 
-        # 解析和验证路径
         configured_index_path = self.config["retrieval"]["index_path"]
         if index_path_override is not None:
             configured_index_path = str(index_path_override.resolve())
@@ -226,13 +200,7 @@ class QueryLengthExperiment:
         if gpu_id is not None:
             os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
-        self.output_dir = output_dir
-        if self.output_dir is None:
-            configured = Path(self.config["output"]["output_dir"])
-            if configured.is_absolute():
-                self.output_dir = configured
-            else:
-                self.output_dir = (config_path.parent / configured).resolve()
+        self.output_dir = self._resolve_output_dir(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         self.logger = self._build_logger()
@@ -242,28 +210,41 @@ class QueryLengthExperiment:
         set_random_seed(self.config["dataset"]["random_seed"])
         torch.set_num_threads(self.config["system"]["num_workers"])
 
-        # 初始化各阶段
-        self.embedding_stage = QueryEmbeddingStage(self.config, self.logger)
-        self.retrieval_stage = RetrievalStage(self.config, self.logger)
+        self.query_length_mode = self.config["query_length_analysis"].get("mode", "natural_binning")
+        self.stage_backend = self.config["query_length_analysis"].get("stage_backend", "cpu")
+        self.logger.info("query_length_mode=%s stage_backend=%s", self.query_length_mode, self.stage_backend)
+
+        self.embedding_stage = self._init_embedding_stage()
+        self.retrieval_stage = self._init_retrieval_stage()
         self.retrieval_stage.set_nprobe(nprobe)
         self.generation_stage = GenerationStage(self.config, llm_model, self.logger)
 
-        # 加载并预处理 query
-        all_queries = self._load_queries()
-        self.warmup_queries, self.eval_queries = split_queries_for_warmup(
-            all_queries,
-            self.config["timing"],
-        )
+        if self.query_length_mode == "controlled_dataset":
+            self.warmup_queries = self._load_warmup_queries_for_controlled_mode()
+            self.eval_queries: List[str] = []
+            self.length_categories = self._load_controlled_length_categories()
+        else:
+            all_queries = self._load_queries_from_hf()
+            self.warmup_queries, self.eval_queries = split_queries_for_warmup(
+                all_queries,
+                self.config["timing"],
+            )
+            self.logger.info(
+                "Warmup queries: %s | Evaluation queries: %s",
+                len(self.warmup_queries),
+                len(self.eval_queries),
+            )
+            self.length_categories = self._bin_and_sample_queries()
 
-        self.logger.info(
-            "Warmup queries: %s | Evaluation queries: %s",
-            len(self.warmup_queries),
-            len(self.eval_queries),
-        )
-
-        # 按长度分类 query（仅用 eval_queries）
-        self.length_categories = self._bin_and_sample_queries()
         self.results: List[CategoryTimingResult] = []
+
+    def _resolve_output_dir(self, output_dir: Optional[Path]) -> Path:
+        if output_dir is not None:
+            return output_dir
+        configured = Path(self.config["output"]["output_dir"])
+        if configured.is_absolute():
+            return configured
+        return (self.config_path.parent / configured).resolve()
 
     def _build_logger(self) -> logging.Logger:
         logger = logging.getLogger(f"query_length.{self.nprobe}.{self.llm_model}")
@@ -286,7 +267,17 @@ class QueryLengthExperiment:
 
         return logger
 
-    def _load_queries(self) -> List[str]:
+    def _init_embedding_stage(self) -> Any:
+        if _supports_backend_arg(QueryEmbeddingStage):
+            return QueryEmbeddingStage(self.config, self.logger, self.stage_backend)
+        return QueryEmbeddingStage(self.config, self.logger)
+
+    def _init_retrieval_stage(self) -> Any:
+        if _supports_backend_arg(RetrievalStage):
+            return RetrievalStage(self.config, self.logger, self.stage_backend)
+        return RetrievalStage(self.config, self.logger)
+
+    def _load_queries_from_hf(self) -> List[str]:
         dataset_config = self.config["dataset"]
         dataset_name = dataset_config["name"]
         split = dataset_config["split"]
@@ -298,7 +289,6 @@ class QueryLengthExperiment:
         dataset = load_dataset(dataset_name, split=split)
         queries = [extract_question(record) for record in dataset]
         queries = [query for query in queries if query]
-
         if not queries:
             raise ValueError(f"No questions could be extracted from dataset {dataset_name}.")
 
@@ -315,51 +305,170 @@ class QueryLengthExperiment:
         return queries
 
     def _bin_and_sample_queries(self) -> Dict[str, Tuple[List[str], List[int]]]:
-        """按长度分类并采样 query"""
-        self.logger.info("Computing token lengths for all queries...")
+        self.logger.info("Computing token lengths for all eval queries...")
         lengths = compute_token_lengths(self.eval_queries, self.embedding_stage.tokenizer)
 
         if self.config["query_length_analysis"].get("print_distribution", False):
             print_length_distribution(self.eval_queries, lengths, self.logger)
 
-        # 分类
         self.logger.info("Binning queries by length...")
         binned = bin_queries_by_length(self.eval_queries, lengths, self.config, self.logger)
 
-        # 采样
-        sample_size = self.config["query_length_analysis"]["sample_size"]
-        random_seed = self.config["dataset"]["random_seed"]
+        sample_size = int(self.config["query_length_analysis"]["sample_size"])
+        random_seed = int(self.config["dataset"]["random_seed"])
 
-        sampled = {}
+        sampled: Dict[str, Tuple[List[str], List[int]]] = {}
         for category in self.config["query_length_analysis"]["categories"].keys():
             cat_queries, cat_lengths = binned[category]
             sampled_queries, sampled_lengths = sample_category(
                 cat_queries,
                 cat_lengths,
                 sample_size,
-                random_seed + ord(category[0]),  # 不同类别不同随机种子
+                random_seed + ord(category[0]),
             )
             sampled[category] = (sampled_queries, sampled_lengths)
-            self.logger.info(
-                f"Sampled {len(sampled_queries)} queries for category '{category}'"
-            )
+            self.logger.info("Sampled %s queries for category '%s'", len(sampled_queries), category)
 
         return sampled
 
-    def run_category_experiment(self, category_name: str, queries: List[str], lengths: List[int]) -> CategoryTimingResult:
-        """
-        对某一类 query 执行实验
+    def _load_warmup_queries_for_controlled_mode(self) -> List[str]:
+        timing_cfg = self.config.get("timing", {})
+        use_warmup = bool(timing_cfg.get("skip_first_batch", False))
+        warmup_count = int(timing_cfg.get("warmup_query_count", 0) or 0)
+        if not use_warmup or warmup_count <= 0:
+            return []
 
-        Args:
-            category_name: "short", "medium", "long"
-            queries: 该类别的所有 query
-            lengths: 对应的 token 长度列表
+        controlled_cfg = self.config["query_length_analysis"].get("controlled_dataset", {})
+        if not controlled_cfg.get("warmup_from_hf", True):
+            self.logger.info("Controlled mode warmup_from_hf=false, skipping warmup.")
+            return []
 
-        Returns:
-            CategoryTimingResult
-        """
-        batch_size = self.config["query_length_analysis"]["batch_size"]
+        warmup_source_queries = self._load_queries_from_hf()
+        if len(warmup_source_queries) <= warmup_count:
+            raise ValueError("warmup_query_count is larger than available warmup queries.")
+        warmup = warmup_source_queries[:warmup_count]
+        self.logger.info("Warmup queries (controlled mode): %s", len(warmup))
+        return warmup
 
+    def _resolve_controlled_dataset_path(self) -> Path:
+        ql_cfg = self.config["query_length_analysis"]
+        controlled_cfg = ql_cfg.get("controlled_dataset", {})
+        raw_path = controlled_cfg.get("path", ql_cfg.get("controlled_dataset_path"))
+        if raw_path is None:
+            raise ValueError(
+                "controlled_dataset mode requires query_length_analysis.controlled_dataset.path "
+                "or query_length_analysis.controlled_dataset_path."
+            )
+        return resolve_path(str(raw_path), self.config_path.parent)
+
+    def _load_controlled_length_categories(self) -> Dict[str, Tuple[List[str], List[int]]]:
+        dataset_path = self._resolve_controlled_dataset_path()
+        if not dataset_path.is_file():
+            raise FileNotFoundError(f"Controlled dataset not found: {dataset_path}")
+
+        ql_cfg = self.config["query_length_analysis"]
+        controlled_cfg = ql_cfg.get("controlled_dataset", {})
+        text_field = controlled_cfg.get("query_field", "query")
+        category_field = controlled_cfg.get("category_field", "category")
+        length_field = controlled_cfg.get("length_field", "actual_tokens")
+        target_field = controlled_cfg.get("target_field", "target_tokens")
+
+        buckets: Dict[str, Tuple[List[str], List[int]]] = {}
+        with dataset_path.open("r", encoding="utf-8") as handle:
+            for line_no, raw_line in enumerate(handle, start=1):
+                line = raw_line.strip()
+                if not line:
+                    continue
+                record = json.loads(line)
+
+                query = record.get(text_field) or record.get("rewrite_query") or record.get("query")
+                if not isinstance(query, str) or not query.strip():
+                    raise ValueError(f"Invalid query text at line {line_no} in {dataset_path}")
+                query = query.strip()
+
+                category = record.get(category_field)
+                if category is None:
+                    target = record.get(target_field)
+                    if target is None:
+                        raise ValueError(
+                            f"Missing category/target at line {line_no} in {dataset_path}. "
+                            f"Expected fields: '{category_field}' or '{target_field}'."
+                        )
+                    category = f"t{int(target)}"
+                else:
+                    category = str(category)
+
+                length_value = record.get(length_field)
+                if isinstance(length_value, (int, float)):
+                    token_len = int(length_value)
+                else:
+                    token_len = len(
+                        self.embedding_stage.tokenizer(
+                            query,
+                            truncation=False,
+                            add_special_tokens=True,
+                        )["input_ids"]
+                    )
+
+                bucket_queries, bucket_lengths = buckets.get(category, ([], []))
+                bucket_queries.append(query)
+                bucket_lengths.append(token_len)
+                buckets[category] = (bucket_queries, bucket_lengths)
+
+        if not buckets:
+            raise ValueError(f"No valid records loaded from controlled dataset: {dataset_path}")
+
+        if "categories" in ql_cfg and isinstance(ql_cfg["categories"], dict) and ql_cfg["categories"]:
+            ordered_categories = [name for name in ql_cfg["categories"].keys() if name in buckets]
+        else:
+            category_order = controlled_cfg.get("category_order")
+            if category_order:
+                ordered_categories = [name for name in category_order if name in buckets]
+            else:
+                ordered_categories = sorted(buckets.keys(), key=_category_sort_key)
+
+        if not ordered_categories:
+            ordered_categories = sorted(buckets.keys(), key=_category_sort_key)
+
+        random_seed = int(self.config["dataset"]["random_seed"])
+        sample_size_cfg = ql_cfg.get("sample_size")
+        if self.test_mode:
+            sample_size_cfg = min(
+                int(self.config["debug"].get("test_sample_size", 100)),
+                min(len(buckets[name][0]) for name in ordered_categories),
+            )
+
+        sampled: Dict[str, Tuple[List[str], List[int]]] = {}
+        for idx, category in enumerate(ordered_categories):
+            queries, lengths = buckets[category]
+            if sample_size_cfg is not None:
+                sampled_queries, sampled_lengths = sample_category(
+                    queries,
+                    lengths,
+                    int(sample_size_cfg),
+                    random_seed + idx,
+                )
+            else:
+                sampled_queries, sampled_lengths = queries, lengths
+
+            sampled[category] = (sampled_queries, sampled_lengths)
+            self.logger.info(
+                "Controlled category '%s': %s queries, avg tokens=%.2f",
+                category,
+                len(sampled_queries),
+                float(np.mean(sampled_lengths)) if sampled_lengths else 0.0,
+            )
+
+        self.logger.info("Loaded controlled dataset from %s", dataset_path)
+        return sampled
+
+    def run_category_experiment(
+        self,
+        category_name: str,
+        queries: List[str],
+        lengths: List[int],
+    ) -> CategoryTimingResult:
+        batch_size = int(self.config["query_length_analysis"]["batch_size"])
         self.logger.info(
             "Running category '%s' with %s queries, batch_size=%s",
             category_name,
@@ -372,22 +481,20 @@ class QueryLengthExperiment:
         total_generation_sec = 0.0
         effective_queries = 0
 
-        # Warmup（可选）
         if self.warmup_queries:
             self.logger.info("Running warmup for category '%s'...", category_name)
             for start_idx in range(0, len(self.warmup_queries), batch_size):
                 warmup_batch = self.warmup_queries[start_idx : start_idx + batch_size]
                 embeddings, _ = self.embedding_stage(warmup_batch)
                 retrieved_docs, _ = self.retrieval_stage(embeddings)
-                self.generation_stage(warmup_batch, retrieved_docs)
+                _ = self.generation_stage(warmup_batch, retrieved_docs)
 
-        # 评估
         for batch_index, start_idx in enumerate(range(0, len(queries), batch_size), start=1):
             batch_queries = queries[start_idx : start_idx + batch_size]
-
             embeddings, embedding_sec = self.embedding_stage(batch_queries)
             retrieved_docs, retrieval_sec = self.retrieval_stage(embeddings)
-            _, generation_sec = self.generation_stage(batch_queries, retrieved_docs)
+            generation_output = self.generation_stage(batch_queries, retrieved_docs)
+            generation_sec = _extract_generation_elapsed(generation_output)
 
             total_embedding_sec += embedding_sec
             total_retrieval_sec += retrieval_sec
@@ -395,10 +502,9 @@ class QueryLengthExperiment:
             effective_queries += len(batch_queries)
 
             if batch_index % self.config["debug"].get("print_interval", 10) == 0:
-                self.logger.info(f"  batch {batch_index}: {len(batch_queries)} queries processed")
+                self.logger.info("  batch %s: %s queries processed", batch_index, len(batch_queries))
 
-        avg_token_len = np.mean(lengths) if lengths else 0.0
-
+        avg_token_len = float(np.mean(lengths)) if lengths else 0.0
         result = CategoryTimingResult(
             category_name=category_name,
             num_queries=effective_queries,
@@ -409,8 +515,7 @@ class QueryLengthExperiment:
         )
 
         self.logger.info(
-            "Category '%s': embedding=%.3fms, retrieval=%.3fms, generation=%.3fms, "
-            "throughput=%.3fqps, avg_tokens=%.1f",
+            "Category '%s': embedding=%.3fms, retrieval=%.3fms, generation=%.3fms, throughput=%.3fqps, avg_tokens=%.1f",
             category_name,
             result.embedding_avg_ms,
             result.retrieval_avg_ms,
@@ -418,25 +523,20 @@ class QueryLengthExperiment:
             result.throughput_qps,
             avg_token_len,
         )
-
         return result
 
     def run(self) -> None:
-        """对所有 query 长度类别执行实验"""
-        # 按 YAML 中定义的顺序遍历（Python 3.7+ dict 保持插入顺序）
-        categories = list(self.config["query_length_analysis"]["categories"].keys())
-
-        for category in categories:
-            queries, lengths = self.length_categories[category]
+        for category, (queries, lengths) in self.length_categories.items():
             result = self.run_category_experiment(category, queries, lengths)
             self.results.append(result)
 
     def save_results(self) -> None:
-        """保存结果到 CSV 和 JSON"""
         rows = [
             {
                 "llm_model": self.llm_model,
                 "nprobe": self.nprobe,
+                "mode": self.query_length_mode,
+                "stage_backend": self.stage_backend,
                 "category": result.category_name,
                 "num_queries": result.num_queries,
                 "avg_token_len": round(result.avg_token_len, 2),
@@ -466,9 +566,16 @@ class QueryLengthExperiment:
                 "dataset_split": self.config["dataset"]["split"],
                 "nprobe": self.nprobe,
                 "llm_model": self.llm_model,
+                "mode": self.query_length_mode,
+                "stage_backend": self.stage_backend,
                 "batch_size": self.config["query_length_analysis"]["batch_size"],
-                "sample_size_per_category": self.config["query_length_analysis"]["sample_size"],
-                "categories_config": self.config["query_length_analysis"]["categories"],
+                "sample_size_per_category": self.config["query_length_analysis"].get("sample_size"),
+                "categories_config": list(self.length_categories.keys()),
+                "controlled_dataset_path": (
+                    str(self._resolve_controlled_dataset_path())
+                    if self.query_length_mode == "controlled_dataset"
+                    else None
+                ),
             },
             "results": [asdict(result) for result in self.results],
         }
@@ -477,7 +584,6 @@ class QueryLengthExperiment:
         self.logger.info("Saved JSON to %s", json_path)
 
     def generate_plots(self) -> None:
-        """生成对比柱状图"""
         if not self.config["output"].get("generate_plots", False):
             return
 
@@ -496,7 +602,6 @@ class QueryLengthExperiment:
         plt.bar(x - width, embedding_times, width, label="Embedding")
         plt.bar(x, retrieval_times, width, label="Retrieval")
         plt.bar(x + width, generation_times, width, label="Generation")
-
         plt.xlabel("Query Length Category")
         plt.ylabel("Average Time per Query (ms)")
         plt.title(f"Latency by Query Length | nprobe={self.nprobe} | llm={self.llm_model}")
@@ -512,19 +617,16 @@ class QueryLengthExperiment:
         plt.savefig(plots_dir / f"latency_by_query_length_{stem}.{plot_format}", dpi=dpi)
         plt.close()
 
-        # 吞吐量对比图
         throughputs = [result.throughput_qps for result in self.results]
-
         plt.figure(figsize=(10, 6))
-        palette = ["steelblue", "green", "orange", "tomato", "red"]
-        colors = palette[:len(categories)]
+        palette = ["steelblue", "green", "orange", "tomato", "red", "purple", "brown"]
+        colors = palette[: len(categories)]
         plt.bar(categories, throughputs, color=colors)
         plt.xlabel("Query Length Category")
         plt.ylabel("Throughput (queries/sec)")
         plt.title(f"Throughput by Query Length | nprobe={self.nprobe} | llm={self.llm_model}")
         plt.grid(True, alpha=0.3, axis="y")
         plt.tight_layout()
-
         plt.savefig(plots_dir / f"throughput_by_query_length_{stem}.{plot_format}", dpi=dpi)
         plt.close()
 
@@ -532,9 +634,7 @@ class QueryLengthExperiment:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Query length impact analysis for one-shot RAG."
-    )
+    parser = argparse.ArgumentParser(description="Query length impact analysis for one-shot RAG.")
     parser.add_argument("--config", type=Path, required=True, help="Path to the YAML config file.")
     parser.add_argument("--nprobe", type=int, required=True, help="FAISS nprobe value.")
     parser.add_argument("--llm_model", type=str, required=True, help="Generator model name from config.")

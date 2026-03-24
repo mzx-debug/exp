@@ -22,6 +22,47 @@ python query_length_experiment.py \
   --test_mode
 ```
 
+## Controlled-Length Dataset (64 x 6)
+
+Use this when natural token-length variance is too small.
+
+### 1) Build the dataset with LLM rewriting
+```bash
+python build_controlled_query_length_dataset.py \
+  --output_dir ./data/controlled_query_length_dataset \
+  --seed_count 64 \
+  --target_lengths 8 16 32 64 128 256 \
+  --provider dashscope \
+  --rewrite_model qwen-plus-latest \
+  --semantic_check
+```
+
+Notes:
+- Qwen (DashScope) default key env is `DASHSCOPE_API_KEY`.
+- DeepSeek key env is `DEEPSEEK_API_KEY`.
+- Token counting uses `intfloat/e5-large-v2` tokenizer.
+- Output main file:
+  `./data/controlled_query_length_dataset/controlled_query_length_dataset.jsonl`
+
+DeepSeek example:
+```bash
+python build_controlled_query_length_dataset.py \
+  --output_dir ./data/controlled_query_length_dataset \
+  --seed_count 64 \
+  --target_lengths 8 16 32 64 128 256 \
+  --provider deepseek \
+  --rewrite_model deepseek-chat \
+  --semantic_check
+```
+
+### 2) Run query-length experiment on the controlled dataset
+```bash
+python query_length_experiment.py \
+  --config query_length_config_controlled.yaml \
+  --nprobe 128 \
+  --llm_model llama3-8B
+```
+
 ## Project Structure
 
 ### Core Scripts
